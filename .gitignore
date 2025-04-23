@@ -21,3 +21,6 @@ snackpub/build
 
 # dotenv
 .env*local
+data/mongodb/
+data/redis/
+.env

@@ -1,0 +1,164 @@
+services:
+  # Database for Snack
+  mongodb:
+    image: mongo:4.4
+    container_name: snack-mongodb
+    volumes:
+      - ./data/mongodb:/data/db
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=snack
+      - MONGO_INITDB_ROOT_PASSWORD=snackpassword
+    restart: always
+    networks:
+      - snack-network
+
+  # Redis for caching
+  redis:
+    image: redis:6.2-alpine
+    container_name: snack-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - ./data/redis:/data
+    ports:
+      - "6379:6379"
+    restart: always
+    networks:
+      - snack-network
+
+  # Snack PubSub - WebSocket communication
+  snackpub:
+    build:
+      context: .
+      dockerfile: ./snackpub/Dockerfile
+      args:
+        node_version: "18"
+    container_name: snack-snackpub
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - PORT=3013
+    ports:
+      - "3013:3013"
+    restart: always
+    networks:
+      - snack-network
+
+  # Snackager - Package bundler service
+  snackager:
+    build:
+      context: .
+      dockerfile: ./snackager/Dockerfile
+      args:
+        node_version: "18"
+    container_name: snack-snackager
+    depends_on:
+      - mongodb
+      - redis
+    environment:
+      - PORT=3001
+      - HOST=0.0.0.0
+      - LOG_LEVEL=info
+      - NPM_REGISTRY=https://registry.npmjs.org
+      - USE_LOCAL_STORAGE=true
+      - LOCAL_STORAGE_PATH=/storage
+      - MONGO_URI=mongodb://snack:snackpassword@mongodb:27017/snackager?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - CORS_ORIGIN=*
+      - IMPORT_SERVER_URL=http://snack-api:3000
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_REGION=us-east-1
+      - S3_REGION=us-east-1
+      - S3_BUCKET=expo-snack
+      - IMPORTS_S3_BUCKET=expo-snack
+      - CLOUDFRONT_URL=https://d1111111111111111111111111111111.cloudfront.net
+      - API_SERVER_URL=http://snack-api:3000
+    volumes:
+      - ./data/storage:/storage
+    ports:
+      - "3001:3001"
+    restart: always
+    networks:
+      - snack-network
+
+  # Snack Runtime - Executes React Native code
+  snack-runtime:
+    container_name: snack-runtime
+    build:
+      context: .
+      dockerfile: ./runtime/Dockerfile
+      args:
+        node_version: "18"
+    # Use host network mode for debugging connectivity
+    network_mode: host 
+    # Ports mapping is not needed/used in host mode
+    # ports:
+    #   - "3002:19006"
+    # Depends on might not be strictly necessary in host mode, but keep for startup order
+    depends_on:
+      - mongodb
+      - redis
+      - snackager
+    environment:
+      - EXPO_PUBLIC_SNACK_ENV=development
+      - CORS_ORIGIN=*
+    restart: always
+    # Cannot belong to a specific network in host mode
+    # networks:
+    #   - snack-network
+
+  # Snack API Server - Main API endpoints
+  snack-api:
+    build:
+      context: .
+      dockerfile: ./website/Dockerfile
+      args:
+        node_version: "18"
+        API_SERVER_URL: "http://localhost:3000"
+        IMPORT_SERVER_URL: "http://snackager:3001"
+        SNACK_WEBPLAYER_URL: "http://localhost/runtime/"
+        SNACK_SERVER_URL: "http://localhost:3000"
+        SERVER_URL: "http://localhost:3000"
+        SNACKPUB_URL: "http://localhost:3000"
+        SNACK_RUNTIME_ENDPOINT: "http://snack-runtime:19006"
+    container_name: snack-api
+    depends_on:
+      - mongodb
+      - redis
+      - snackager
+      - snack-runtime
+      - snackpub
+    environment:
+      - PORT=3011
+      - NODE_ENV=production
+      - MONGO_URI=mongodb://snack:snackpassword@mongodb:27017/snack?authSource=admin
+      - REDIS_URL=redis://redis:6379
+      - CORS_ORIGIN=*
+    ports:
+      - "3000:3011"
+    restart: always
+    networks:
+      - snack-network
+
+  # Nginx proxy for easier access
+  nginx:
+    image: nginx:1.21-alpine
+    container_name: snack-nginx
+    depends_on:
+      - snackager
+      - snack-runtime
+      - snack-api
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "80:80"
+    restart: always
+    networks:
+      - snack-network
+
+networks:
+  snack-network:
+    driver: bridge

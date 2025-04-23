@@ -31,7 +31,7 @@ WORKDIR /app
 COPY --from=scoper /app/out/json .
 COPY --from=scoper /app/out/yarn.lock .
 # Install dependencies
-RUN yarn install --frozen-lockfile --ignore-scripts
+RUN NODE_OPTIONS="" yarn install --frozen-lockfile --ignore-scripts
 
 # Copy "scoped" repository
 COPY --from=scoper /app/out/full .
