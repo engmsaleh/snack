@@ -1,0 +1,10 @@
+{
+    "sdk": {
+        "currentSdkVersion": "50.0.0",
+        "sdkVersions": {
+            "50.0.0": {
+                "isDeprecated": false
+            }
+        }
+    }
+}

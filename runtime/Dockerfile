@@ -1,34 +1,43 @@
-# Use a specific Node version consistent with the project (from root package.json)
-ARG node_version=18.17.1
-FROM node:${node_version}-alpine as base
+# Use Node 18 with Alpine for smaller image size
+FROM node:18-alpine
 
+# Set environment variables
+ENV EXPO_PUBLIC_SNACK_ENV=development \
+    NODE_OPTIONS="--max_old_space_size=4096"
+
+# Install dependencies in a single layer to reduce image size
+RUN apk add --no-cache git
+
+# Set working directory
 WORKDIR /app
 
-# Copy root package.json and yarn.lock to leverage Docker cache
-COPY package.json yarn.lock ./
-# Copy workspaces definition from turbo.json if needed for yarn install,
-# or just install dependencies for the runtime package specifically later.
+# Copy package.json 
+COPY runtime/package.json ./
 
-# Copy the runtime directory contents
-COPY runtime/ ./runtime/
-# Copy necessary packages depended upon by runtime
-# We might need to refine this based on actual dependencies needed at runtime vs build time
-COPY packages/snack-babel-standalone ./packages/snack-babel-standalone
-COPY packages/snack-content ./packages/snack-content
-COPY packages/snack-require-context ./packages/snack-require-context
-# Add other packages/* if needed by runtime
+# Create packages directory structure and copy the local packages
+RUN mkdir -p ../packages/snack-babel-standalone ../packages/snack-content ../packages/snack-require-context
 
-WORKDIR /app/runtime
+# Copy the local packages to their expected relative locations
+COPY packages/snack-babel-standalone ../packages/snack-babel-standalone/
+COPY packages/snack-content ../packages/snack-content/
+COPY packages/snack-require-context ../packages/snack-require-context/
 
-# Install dependencies *within* the runtime directory
-# Use --frozen-lockfile if runtime/yarn.lock exists and is reliable
-RUN yarn install --frozen-lockfile
+# Install dependencies including local packages
+RUN yarn install --production=false --network-timeout 600000 && \
+    yarn add --dev @types/react-native && \
+    yarn cache clean
 
-# Expo web default port is 19006
+# Copy only necessary files
+COPY runtime/metro.config.js ./
+COPY runtime/app.json ./
+COPY runtime/babel.config.js ./
+COPY runtime/index.js ./
+COPY runtime/src/ ./src/
+COPY runtime/assets/ ./assets/
+COPY runtime/web/ ./web/
+
+# Expose the port
 EXPOSE 19006
 
-# Environment variable used in runtime/package.json scripts
-ENV EXPO_PUBLIC_SNACK_ENV=development
-
-# Use yarn run to execute the script defined in package.json, passing through host/port args
-CMD ["yarn", "run", "web", "--", "--host", "lan", "--port", "19006"] 
+# Start the web server
+CMD ["npx", "expo", "start", "--web", "--host", "lan", "--port", "19006", "--no-dev"] 
