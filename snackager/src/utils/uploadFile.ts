@@ -12,7 +12,7 @@ export default async function uploadFile(
         Bucket: config.s3.bucket,
         Key: key,
         Body: body,
-        ACL: 'public-read',
+        // ACL: 'public-read',
         CacheControl: 'public, max-age=31536000',
       })
       .promise();

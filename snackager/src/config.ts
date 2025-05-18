@@ -16,6 +16,7 @@ type Config = {
     bucket: string;
     imports_bucket: string;
     region: string;
+    prefix: string;
   };
   cloudfront: { url: string };
   api: { url: string };
@@ -39,16 +40,17 @@ const config: Config = {
   tmpdir: path.join(process.env.TMPDIR ?? '/tmp', 'snackager'),
   url: env('IMPORT_SERVER_URL'),
   redis: {
-    url: env('REDIS_URL'),
+    url: process.env.REDIS_URL || 'redis://localhost:6379',
   },
   aws: {
     access_key: env('AWS_ACCESS_KEY_ID'),
     secret_key: env('AWS_SECRET_ACCESS_KEY'),
   },
   s3: {
-    bucket: env('S3_BUCKET'),
-    imports_bucket: env('IMPORTS_S3_BUCKET'),
-    region: env('S3_REGION'),
+    bucket: process.env.S3_BUCKET_NAME || process.env.S3_BUCKET || 'snackager-public-local',
+    imports_bucket: process.env.IMPORTS_S3_BUCKET || 'snackager-imports-local',
+    region: process.env.S3_REGION || 'us-east-1',
+    prefix: process.env.S3_PREFIX || 'snackager-1/',
   },
   cloudfront: {
     url: env('CLOUDFRONT_URL'),

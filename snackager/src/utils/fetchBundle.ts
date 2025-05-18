@@ -13,6 +13,7 @@ import config from '../config';
 import { createRedisClient } from '../external/redis';
 import logger from '../logger';
 import { Package } from '../types';
+import { s3 } from '../external/aws';
 
 // TODO: find the typescript definitions for this package, `@types/sander` doesn't exists
 const { mkdir, rimraf, writeFile, exists } = require('sander');
@@ -81,13 +82,12 @@ export default async function fetchBundle({
 
   const unavailable: string[] = [];
 
-  // TODO: check if we can simplify this type
   const inProgress: false | null | { [key: string]: string } =
     !rebuild &&
     (await new Promise((resolve) =>
       client.hgetall(buildStatusRedisId, (err, value) => {
         if (err) {
-          resolve(null); // TODO(perry) figure out why this is like this and add a comment
+          resolve(null);
         } else {
           resolve(value);
         }
@@ -95,11 +95,6 @@ export default async function fetchBundle({
     ));
 
   if (inProgress) {
-    // The TTL was not always set correctly on the redis value,
-    // because it was previously not executed as a transaction.
-    // This caused the status to sometimes be permanently "pending" or "error".
-    // Delete the corrupted value if the TTL was not set.
-    // TODO: Remove this in mid 2021
     client.ttl(buildStatusRedisId, (err, value) => {
       if (!err && value < 0) {
         logger.warn(logMetadata, `redis value without TTL found, deleting`);
@@ -107,15 +102,69 @@ export default async function fetchBundle({
       }
     });
 
-    switch (inProgress.type) {
-      case 'pending':
-        logger.info(logMetadata, `bundling is already in progress, waiting`);
-        return { name: fullName, version, pending: true };
-      case 'error':
-        logger.warn({ ...logMetadata, error: inProgress.message }, `an error occurred earlier`);
-        if (!process.env.DEBUG_LOCAL_FILES) {
-          throw new Error(inProgress.message);
+    if (inProgress.type === 'finished') {
+      if (inProgress.hash === hash) {
+        logger.info({ ...logMetadata, redisHash: inProgress.hash, requestHash: hash }, `Redis status is 'finished' and hash matches. Verifying .done files using Redis handle: ${inProgress.handle}.`);
+        
+        const platformCheckPromises = platforms.map(async (platform) => {
+          let isPlatformDone = false;
+          const checkHandle = inProgress.handle;
+          
+          if (process.env.DEBUG_LOCAL_FILES) {
+            const doneFilePath = path.join(config.tmpdir, 'output', `${checkHandle}-${platform}/.done`);
+            if (await exists(doneFilePath)) {
+              isPlatformDone = true;
+              logger.info({ ...logMetadata, platform, path: doneFilePath }, `Platform ${platform} .done file VERIFIED locally (used Redis handle: ${checkHandle}).`);
+            } else {
+              logger.warn({ ...logMetadata, platform, path: doneFilePath }, `Platform ${platform} .done file NOT found locally (used Redis handle: ${checkHandle}, expected for finished Redis state).`);
+            }
+          } else {
+            const s3Key = `${checkHandle}-${platform}/.done`;
+            logger.info({ ...logMetadata, platform, bucket: config.s3.bucket, key: s3Key, handleFromRedis: checkHandle }, `Verifying .done file via s3.headObject on S3-compatible storage`);
+            try {
+              await s3
+                .headObject({
+                  Bucket: config.s3.bucket,
+                  Key: s3Key,
+                })
+                .promise();
+              isPlatformDone = true;
+              logger.info({ ...logMetadata, platform, bucket: config.s3.bucket, key: s3Key }, `Platform ${platform} .done file VERIFIED on S3-compatible storage (used Redis handle: ${checkHandle}).`);
+            } catch (e: any) {
+              const status = e.statusCode || (e.code === 'NotFound' || e.code === 'NoSuchKey' ? 404 : 500);
+              logger.warn(
+                { ...logMetadata, platform, handle: checkHandle, status: status, errMsg: e.message },
+                `Platform ${platform} .done file NOT found on S3-compatible storage (used Redis handle: ${checkHandle}, status ${status}, expected for finished Redis state).`
+              );
+            }
+          }
+          return { platform, isPlatformDone };
+        });
+
+        const platformResults = await Promise.all(platformCheckPromises);
+        if (platformResults.every(result => result.isPlatformDone)) {
+          logger.info({ ...logMetadata, handle: inProgress.handle }, "All platform .done files verified. Returning cached bundle based on 'finished' Redis status.");
+          return {
+            name: fullName,
+            hash: inProgress.hash,
+            handle: inProgress.handle,
+            version: inProgress.version || pkg.version,
+            dependencies: peerDependencies,
+          };
+        } else {
+          logger.warn({ ...logMetadata, handleFromRedis: inProgress.handle, currentHandle: handle }, "Redis status is 'finished' with matching hash, but one or more .done files are missing. Proceeding to re-bundle.");
         }
+      } else {
+        logger.info({ ...logMetadata, redisHash: inProgress.hash, requestHash: hash }, `Redis status is 'finished' but for a different hash (${inProgress.hash} vs ${hash}). Re-bundling required.`);
+      }
+    } else if (inProgress.type === 'pending') {
+      logger.info(logMetadata, `bundling is already in progress, waiting`);
+      return { name: fullName, version, pending: true };
+    } else if (inProgress.type === 'error') {
+      logger.warn({ ...logMetadata, error: inProgress.message }, `an error occurred earlier`);
+      if (!process.env.DEBUG_LOCAL_FILES) {
+        throw new Error(inProgress.message);
+      }
     }
   }
 
@@ -142,18 +191,20 @@ export default async function fetchBundle({
           unavailable.push(platform);
         }
       } else {
-        const url = `https://s3-${config.s3.region}.amazonaws.com/${
-          config.s3.bucket
-        }/${encodeURIComponent(handle)}-${platform}/.done`;
-
-        const response = await fetch(url, {
-          method: 'HEAD',
-          timeout: 10000,
-        });
-        if (response.status !== 200) {
+        try {
+          await s3.headObject({
+            Bucket: config.s3.bucket,
+            Key: `${handle}-${platform}/.done`,
+          }).promise();
           logger.info(
-            { ...logMetadata, platform, status: response.status },
-            `is not cached for platform: ${platform}`,
+            { ...logMetadata, platform },
+            `Platform ${platform} .done file found on S3-compatible storage.`
+          );
+        } catch (error: any) {
+          const status = error.statusCode || (error.code === 'NotFound' || error.code === 'NoSuchKey' ? 404 : 500);
+          logger.info(
+            { ...logMetadata, platform, status: status, errMsg: error.message },
+            `${pkg.name} Platform ${platform} .done file NOT found on S3-compatible storage (status ${status}) (expected for finished Redis state).`
           );
           unavailable.push(platform);
         }
@@ -193,8 +244,6 @@ export default async function fetchBundle({
         }
       });
   });
-  // When the pending status was already set by another instance,
-  // then do not attempt to bundle again.
   if (isAlreadySet && !rebuild) {
     logger.info(logMetadata, `bundling is already in progress, waiting`);
     return { name: fullName, version, pending: true };
@@ -273,7 +322,16 @@ export default async function fetchBundle({
             { ...logMetadata, platform, hash },
             `marking platform as complete: ${platform}`,
           );
-          await uploadFile(`${handle}-${platform}/.done`, Buffer.alloc(0));
+          const doneS3Key = `${handle}-${platform}/.done`;
+          logger.info({ ...logMetadata, platform, generatedHandle: handle, finalS3KeyForDoneWrite: doneS3Key, bucket: config.s3.bucket }, `CREATING .done file on S3. Generated handle: ${handle}, Final S3 Key for .done: ${doneS3Key}`);
+          await s3
+            .putObject({
+              Bucket: config.s3.bucket,
+              Key: doneS3Key,
+              Body: '',
+            })
+            .promise();
+          logger.info({ ...logMetadata, platform, bucket: config.s3.bucket, key: doneS3Key }, `Created .done file on S3-compatible storage`);
 
           if (latestHandle) {
             client.set(latestCompletedVersionRedisId, version);
@@ -288,13 +346,27 @@ export default async function fetchBundle({
     }
 
     logger.info(logMetadata, `marking id as finished`);
-    client.del(buildStatusRedisId);
-  } catch (error) {
+    const finishedStatus: { [key: string]: string } = {
+      type: 'finished',
+      hash: hash,
+      handle: handle,
+      version: pkg.version,
+    };
+    client.multi()
+      .hmset(buildStatusRedisId, finishedStatus)
+      .expire(buildStatusRedisId, EXPIRATION_SECONDS)
+      .exec((err, _replies) => {
+        if (err) {
+          logger.error({ ...logMetadata, error: err }, 'Error marking bundle as finished in Redis');
+        } else {
+          logger.info({ ...logMetadata }, 'Successfully marked bundle as finished in Redis');
+        }
+      });
+  } catch (error: any) {
     logger.error(
-      { ...logMetadata, error },
-      `unable to bundle, removing key from redis. error: ${error.message}`,
+      { ...logMetadata, error, stack: error?.stack },
+      `UNABLE TO BUNDLE (this is the main catch block). Error: ${error?.message}`,
     );
-    // Remove at a delay so we don't keep retrying
     client
       .multi()
       .hmset(buildStatusRedisId, { type: 'error', message: error.message })
@@ -305,7 +377,6 @@ export default async function fetchBundle({
     }
   } finally {
     if (!process.env.DEBUG_LOCAL_FILES) {
-      // TODO: replace rimraf with fs.rm once node 14.40 lands
       rimraf(dir);
     }
   }

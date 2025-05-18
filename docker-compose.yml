@@ -27,6 +27,29 @@ services:
     networks:
       - snack-network
 
+  # MinIO S3-compatible object storage
+  minio:
+    image: minio/minio:RELEASE.2023-09-07T02-05-02Z # Or :latest
+    container_name: snack-minio
+    ports:
+      - "9000:9000"  # MinIO API
+      - "9001:9001"  # MinIO Web Console
+    environment:
+      MINIO_ROOT_USER: snackageraccesskey
+      MINIO_ROOT_PASSWORD: snackagersecretkey
+      MINIO_DEFAULT_BUCKETS: snackager-local-data
+    volumes:
+      - minio_storage:/data
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    restart: always
+    networks:
+      - snack-network
+
   # Snack PubSub - WebSocket communication
   snackpub:
     build:
@@ -57,23 +80,39 @@ services:
     depends_on:
       - mongodb
       - redis
+      - minio
     environment:
       - PORT=3001
       - HOST=0.0.0.0
       - LOG_LEVEL=info
       - NPM_REGISTRY=https://registry.npmjs.org
-      - USE_LOCAL_STORAGE=true
+      - USE_LOCAL_STORAGE=false
       - LOCAL_STORAGE_PATH=/storage
       - MONGO_URI=mongodb://snack:snackpassword@mongodb:27017/snackager?authSource=admin
       - REDIS_URL=redis://redis:6379
       - CORS_ORIGIN=*
       - IMPORT_SERVER_URL=http://snack-api:3000
-      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
-      - AWS_REGION=us-east-1
-      - S3_REGION=us-east-1
-      - S3_BUCKET=expo-snack
-      - IMPORTS_S3_BUCKET=expo-snack
+
+      # Provide dummy AWS creds to pass initial config validation when using MinIO
+      - AWS_ACCESS_KEY_ID=DUMMY_AWS_KEY_ID_FOR_MINIO_SETUP
+      - AWS_SECRET_ACCESS_KEY=DUMMY_AWS_SECRET_FOR_MINIO_SETUP
+      
+      # Standard AWS SDK var to point to MinIO endpoint
+      - AWS_S3_ENDPOINT=http://minio:9000
+
+      - S3_BUCKET=snackager-local-data # Changed to use MinIO bucket name for legacy config check
+      - IMPORTS_S3_BUCKET=snackager-local-data # Pointing to the MinIO bucket name
+
+      - S3_REGION=us-east-1 # Kept for SDK, MinIO isn't strict
+
+      # MinIO S3 Configuration (AWS_S3_ENDPOINT above should handle endpoint for SDK)
+      # S3_ENDPOINT_URL might be redundant if AWS_S3_ENDPOINT is used by SDK, but kept for safety or if snackager code uses it directly.
+      - S3_ENDPOINT_URL=http://minio:9000 
+      - S3_ACCESS_KEY_ID=snackageraccesskey # This is for MinIO auth
+      - S3_SECRET_ACCESS_KEY=snackagersecretkey # This is for MinIO auth
+      - S3_BUCKET_NAME=snackager-local-data # Explicit name for MinIO bucket operations
+      - S3_FORCE_PATH_STYLE=true
+
       - CLOUDFRONT_URL=https://d1111111111111111111111111111111.cloudfront.net
       - API_SERVER_URL=http://snack-api:3000
     volumes:
@@ -161,3 +200,6 @@ services:
 networks:
   snack-network:
     driver: bridge
+
+volumes:
+  minio_storage:

@@ -22,7 +22,7 @@ it('uploads new file to s3', async () => {
   });
   expect(s3.upload).toBeCalledWith(
     expect.objectContaining({
-      ACL: 'public-read',
+      // ACL: 'public-read',
       Body: testBody,
       Bucket: 'bucket',
       Key: 'my-file',

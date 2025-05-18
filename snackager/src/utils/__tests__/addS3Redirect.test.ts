@@ -20,7 +20,7 @@ it('stores new s3 website redirect', async () => {
   });
   expect(s3.putObject).toBeCalledWith(
     expect.objectContaining({
-      ACL: 'public-read',
+      // ACL: 'public-read',
       Body: '',
       Bucket: 'bucket',
       Key: 'from',

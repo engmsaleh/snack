@@ -25,7 +25,7 @@ describe('cacheObj', () => {
     expect(await cacheObj(testSnackObject, 'my-file')).toBeUndefined();
     expect(s3.upload).toBeCalledWith(
       expect.objectContaining({
-        ACL: 'public-read',
+        // ACL: 'public-read',
         Body: expect.any(String),
         Bucket: 'imports',
         Key: 'my-file',

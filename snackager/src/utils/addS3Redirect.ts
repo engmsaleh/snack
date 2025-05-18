@@ -12,7 +12,7 @@ export default async function addS3Redirect(
         Bucket: config.s3.bucket,
         Key: `${key}`,
         Body: '',
-        ACL: 'public-read',
+        // ACL: 'public-read',
         CacheControl: 'no-cache',
         WebsiteRedirectLocation: `/${destination}`,
       })
